@@ -1,0 +1,388 @@
+# The Validity of LLM Trait Prediction in a Recruitment Context 
+# This script processes and analyses data from my dissertation study
+
+# Loading necessary libraries
+
+library(tidyverse)
+library(jsonlite)    # analysing AI_Results
+library(psych)       # Fisher's z (r.test)
+library(car)         # Manova / Anova with Type III SS
+
+# Loading data
+# Update the filename/path to match your local file lcoation
+
+df <- read_csv("33755477 - Self Reported.csv")
+
+# Defining key variables
+
+traits <- c("Extraversion", "Agreeableness", "Conscientiousness",
+            "Neuroticism", "Openness")
+
+conditions <- c("Honest", "Job")
+
+# Data prep section
+
+# As the IPIP-50 responses are recorded as text, they need to be mapped to numeric values for mathematical tests to be performed later
+
+likert_map <- c(
+  "Very Inaccurate"                 = 1,
+  "Moderately Inaccurate"           = 2,
+  "Neither Accurate Nor Inaccurate" = 3,
+  "Moderately Accurate"             = 4,
+  "Very Accurate"                   = 5
+)
+
+q_cols <- paste0("Q", 1:50)
+
+df <- df %>%
+  mutate(across(all_of(q_cols), ~ likert_map[.x]))
+
+# Reverse scoring the IPIP-50, as some questions are negatively worded and must be scored according to the IPIP-50 scoring key
+
+reverse_items <- c(6,16,26,36,46, 2,12,22,32,42, 8,18,28,38,48,
+                   4,14,24,34,44, 10,20,30,40,50)
+reverse_cols  <- paste0("Q", reverse_items)
+
+df <- df %>%
+  mutate(across(all_of(reverse_cols), ~ 6 - .x))
+
+# Mean IPIP-50 trait score calculations (scale of 1–5)
+
+extraversion_items      <- paste0("Q", c(1, 6,11,16,21,26,31,36,41,46))
+agreeableness_items     <- paste0("Q", c(2, 7,12,17,22,27,32,37,42,47))
+conscientiousness_items <- paste0("Q", c(3, 8,13,18,23,28,33,38,43,48))
+neuroticism_items       <- paste0("Q", c(4, 9,14,19,24,29,34,39,44,49))
+openness_items          <- paste0("Q", c(5,10,15,20,25,30,35,40,45,50))
+
+df <- df %>%
+  mutate(
+    SR_Extraversion      = rowMeans(select(., all_of(extraversion_items)),      na.rm = TRUE),
+    SR_Agreeableness     = rowMeans(select(., all_of(agreeableness_items)),     na.rm = TRUE),
+    SR_Conscientiousness = rowMeans(select(., all_of(conscientiousness_items)), na.rm = TRUE),
+    SR_Neuroticism       = rowMeans(select(., all_of(neuroticism_items)),       na.rm = TRUE),
+    SR_Openness          = rowMeans(select(., all_of(openness_items)),          na.rm = TRUE)
+  )
+
+# AI Results section
+
+# Break down 'AI_Results' into separate trait columns, as the default output saves all results in a single cell
+
+parse_ai <- function(x) {
+  fromJSON(gsub("'", '"', x))
+}
+
+ai_df <- bind_rows(lapply(df$AI_Results, parse_ai)) %>%
+  rename_with(~ paste0("AI_", .)) %>%
+  rename_with(~ gsub("AI_Extroversion", "AI_Extraversion", .))  # Normalised spelling, the model uses 'extroversion', whereas 'extraversion' is preferred
+
+cat("\nDimensions of ai_df:", nrow(ai_df), "rows,", ncol(ai_df), "cols\n")
+cat("Columns in ai_df:", paste(names(ai_df), collapse = ", "), "\n")
+
+df <- bind_cols(df, ai_df)
+
+cat("Columns in df after AI parsing:\n")
+print(names(df))
+
+cat("\nChecking AI trait columns exist:\n")
+for (trait in traits) {
+  col <- paste0("AI_", trait)
+  cat(sprintf("  %s: %s\n", col, ifelse(col %in% names(df), "EXISTS", "MISSING")))
+}
+
+# Z-standardise self reported and AI estimated scores for each trait
+# This is necessary because SR and AI scores are on different scales, this standardisation allows for direct comparison
+
+for (trait in traits) {
+  df[[paste0("SR_z_", trait)]] <- scale(df[[paste0("SR_", trait)]])[, 1]
+  df[[paste0("AI_z_", trait)]] <- scale(df[[paste0("AI_", trait)]])[, 1]
+}
+
+# Save the processed dataset
+# Find in your working directory
+
+write_csv(df, "scored_standardised_data.csv")
+cat("\nProcessed data saved to: scored_standardised_data.csv\n")
+
+# Starting a sink to save all following analysis results in a .txt format for easy viewing
+
+sink("analysis_results.txt", split = TRUE)
+cat("Analysis Results —", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat(rep("=", 60), "\n\n", sep = "")
+
+# Recording initial Descriptive statistics
+
+cat("\n--- Descriptive Statistics ---\n")
+
+desc_vars <- c(paste0("SR_", traits), paste0("AI_", traits))
+
+desc_stats <- df %>%
+  summarise(across(all_of(desc_vars), list(
+    M   = ~ round(mean(.x, na.rm = TRUE), 2),
+    SD  = ~ round(sd(.x,   na.rm = TRUE), 2),
+    Min = ~ round(min(.x, na.rm = TRUE), 2),
+    Max = ~ round(max(.x, na.rm = TRUE), 2)
+  ))) %>%
+  pivot_longer(everything(),
+               names_to  = c("Variable", ".value"),
+               names_sep = "_(?=[^_]+$)") %>%
+  arrange(Variable)
+
+print(desc_stats)
+
+# Some additional variable coding
+# Transforming SES to an ordinal numeric scale, as it was initially recorded as text
+# "Prefer not to say" = NA, excluded from analysis in moderation testing
+
+ses_map <- c(
+  "Below 5 GCSEs"                                 = 1,
+  "More than 5 GCSEs"                             = 2,
+  "A-Levels or equivalent (e.g. college)"         = 3,
+  "Bachelor's degree (BA, BSc, etc.) or equivalent" = 4,
+  "Master's (MA/MSc) or Doctorate (PhD)"          = 5,
+  "Prefer not to say"                             = NA_real_
+)
+
+df <- df %>%
+  mutate(SES_numeric = ses_map[SES])
+
+# Transform each Condition to dummy variable (0 = Honest, 1 = Job) for regression analysis
+
+df <- df %>%
+  mutate(Condition_dummy = ifelse(Condition == "Job", 1, 0))
+
+# Normality Assumptions (Shapiro-Wilk)
+# Normality is required for Pearson's correlations
+# Violations are flagged, and addressed with Spearman robustness checks
+
+cat("\n--- Shapiro-Wilk Normality Tests ---\n")
+cat(sprintf("%-22s %8s %8s\n", "Variable", "W", "p-value"))
+cat(rep("-", 42), "\n", sep = "")
+
+# Test all trait columns
+
+normality_vars <- c(paste0("SR_", traits), paste0("AI_", traits))
+
+for (var in normality_vars) {
+  s_test <- shapiro.test(df[[var]])
+  cat(sprintf("%-22s %8.3f %8.4f%s\n", 
+              var, s_test$statistic, s_test$p.value,
+              ifelse(s_test$p.value < .05, " <-- Non-normal", "")))
+}
+
+# Robustness check (Spearman's Rho)
+
+cat("\n--- Spearman's Rho: Conscientiousness Robustness Check ---\n")
+cat(sprintf("%-22s %6s %8s\n", "Sample", "rho", "p"))
+cat(rep("-", 40), "\n", sep = "")
+
+# full sample
+
+sp_full <- cor.test(df$SR_Conscientiousness, df$AI_Conscientiousness, method = "spearman", exact = FALSE)
+cat(sprintf("%-22s %6.3f %8.4f\n", "Full Sample (N=72)", sp_full$estimate, sp_full$p.value))
+
+# By condition
+
+for (cond in conditions) {
+  sub_sp <- df %>% filter(Condition == cond)
+  test_sp <- cor.test(sub_sp$SR_Conscientiousness, sub_sp$AI_Conscientiousness, method = "spearman", exact = FALSE)
+  cat(sprintf("%-22s %6.3f %8.4f\n", paste(cond, "Condition"), test_sp$estimate, test_sp$p.value))
+}
+
+# Pearson's correlations and Fishers's Z
+# Assessing discriminant validity between AI and SR personality scores
+# Full data set
+
+cat("\n--- Full Sample (N =", nrow(df), ") ---\n")
+cat(sprintf("%-22s %6s %4s %8s %8s\n", "Trait", "r", "df", "t", "p"))
+cat(rep("-", 54), "\n", sep = "")
+
+r_full <- list()
+for (trait in traits) {
+  test <- cor.test(df[[paste0("SR_z_", trait)]], df[[paste0("AI_z_", trait)]],
+                   method = "pearson")
+  r_full[[trait]] <- test$estimate
+  df_val <- test$parameter
+  cat(sprintf("%-22s %6.3f %4d %8.3f %8.4f%s\n",
+              trait, test$estimate, df_val, test$statistic, test$p.value,
+              ifelse(test$p.value < .05, " *", "")))
+}
+
+# Correlations by condition
+
+r_by_cond  <- list()
+
+for (cond in conditions) {
+  sub <- df %>% filter(Condition == cond)
+  cat(sprintf("\n--- %s Condition (n = %d) ---\n", cond, nrow(sub)))
+  cat(sprintf("%-22s %6s %4s %8s %8s\n", "Trait", "r", "df", "t", "p"))
+  cat(rep("-", 54), "\n", sep = "")
+  
+  r_by_cond[[cond]] <- list()
+  for (trait in traits) {
+    test <- cor.test(sub[[paste0("SR_z_", trait)]], sub[[paste0("AI_z_", trait)]],
+                     method = "pearson")
+    df_val <- test$parameter
+    r_by_cond[[cond]][[trait]] <- list(r = test$estimate, n = nrow(sub))
+    cat(sprintf("%-22s %6.3f %4d %8.3f %8.4f%s\n",
+                trait, test$estimate, df_val, test$statistic, test$p.value,
+                ifelse(test$p.value < .05, " *", "")))
+  }
+}
+# Fisher's Z Test to see whether correlation coefficients differ between conditions
+
+cat("\n--- Fisher's z: Honest vs Job condition ---\n")
+cat(sprintf("%-22s %8s %8s %8s\n", "Trait", "z", "p", "Interpretation"))
+cat(rep("-", 60), "\n", sep = "")
+
+for (trait in traits) {
+  r_honest <- r_by_cond[["Honest"]][[trait]]$r
+  n_honest <- r_by_cond[["Honest"]][[trait]]$n
+  r_job    <- r_by_cond[["Job"]][[trait]]$r
+  n_job    <- r_by_cond[["Job"]][[trait]]$n
+
+  # r.test from psych: tests difference between two independent correlations
+  
+  fisher_test <- r.test(n  = n_honest, r12 = r_honest,
+                        n2 = n_job,    r34 = r_job)
+  z_val <- fisher_test$z
+  p_val <- fisher_test$p
+
+  interp <- ifelse(p_val < .05,
+                   ifelse(abs(r_honest) > abs(r_job), "Honest stronger", "Job stronger"),
+                   "No sig. difference")
+
+  cat(sprintf("%-22s %8.3f %8.4f  %s\n", trait, z_val, p_val, interp))
+}
+
+# MANOVA
+# Comparing AI trait scores between honest and job conditions
+# Dependent variables: AI z-scores for all five traits
+
+ai_z_cols <- paste0("AI_z_", traits)
+dv_matrix <- as.matrix(df[, ai_z_cols])
+
+manova_model <- manova(dv_matrix ~ Condition, data = df)
+
+# Pillai's trace reporting
+
+cat("\n--- MANOVA Omnibus Test ---\n")
+print(summary(manova_model, test = "Pillai"))
+
+# Followups for significant results
+
+cat("\n--- Univariate Follow-up ANOVAs (interpret only if MANOVA is significant) ---\n")
+print(summary.aov(manova_model))
+
+# Calculating effect sizes for each univariate ANOVA
+
+cat("\n--- Partial Eta Squared (η²p) for Univariate ANOVAs ---\n")
+cat(sprintf("%-28s %8s %8s\n", "Trait", "η²p", "Interpretation"))
+cat(rep("-", 48), "\n", sep = "")
+
+aov_results <- summary.aov(manova_model)
+
+for (i in seq_along(traits)) {
+  aov_table <- aov_results[[i]]
+  SS_effect <- aov_table["Condition",  "Sum Sq"]
+  SS_error  <- aov_table["Residuals",  "Sum Sq"]
+  eta_sq_p  <- SS_effect / (SS_effect + SS_error)
+  
+  interp <- case_when(
+    eta_sq_p >= .14 ~ "Large",
+    eta_sq_p >= .06 ~ "Medium",
+    eta_sq_p >= .01 ~ "Small",
+    TRUE            ~ "Negligible"
+  )
+  
+  cat(sprintf("%-28s %8.3f %s\n", ai_z_cols[i], eta_sq_p, interp))
+}
+
+# Descriptive statistics for AI scores by condition
+
+cat("\n--- Condition Means (AI z-scores) ---\n")
+df %>%
+  group_by(Condition) %>%
+  summarise(across(all_of(ai_z_cols), ~ round(mean(.x, na.rm = TRUE), 3)),
+            n = n()) %>%
+  print()
+
+cat("\n--- Condition Means (AI raw proportions, for interpretability) ---\n")
+ai_raw_cols <- paste0("AI_", traits)
+df %>%
+  group_by(Condition) %>%
+  summarise(across(all_of(ai_raw_cols), ~ round(mean(.x, na.rm = TRUE), 3)),
+            n = n()) %>%
+  print()
+
+# Moderated Multiple Regression
+# Does SES moderate the relationship between SR and AI personality scores?
+# Run separately for each of the five traits.
+# Exclude participants with SES = "Prefer not to say"
+
+df_h3 <- df %>% filter(!is.na(SES_numeric))
+cat("N for H3 (SES complete cases):", nrow(df_h3), "\n")
+
+# Mean-centre SR scores and SES before calculating interaction
+  # reduces multicollinearity between main effects and interaction term
+
+df_h3 <- df_h3 %>%
+  mutate(SES_c = scale(SES_numeric, center = TRUE, scale = FALSE)[, 1])
+
+for (trait in traits) {
+  sr_z  <- paste0("SR_z_", trait)
+  ai_z  <- paste0("AI_z_", trait)
+
+  # Centre the SR predictor
+  
+  df_h3[[paste0(sr_z, "_c")]] <- scale(df_h3[[sr_z]],
+                                       center = TRUE, scale = FALSE)[, 1]
+
+  sr_c <- paste0(sr_z, "_c")
+
+  cat(sprintf("\n--- %s ---\n", trait))
+
+  # Step 1: Main effects only
+  
+  m1 <- lm(as.formula(paste(ai_z, "~", sr_c, "+ SES_c")), data = df_h3)
+
+  # Step 2: Add interaction term
+  
+  m2 <- lm(as.formula(paste(ai_z, "~", sr_c, "* SES_c")), data = df_h3)
+
+  cat("\nStep 1 — Main effects:\n")
+  print(summary(m1)$coefficients)
+  cat(sprintf("  R² = %.3f, Adjusted R² = %.3f\n",
+              summary(m1)$r.squared, summary(m1)$adj.r.squared))
+
+  cat("\nStep 2 — With SES × SR interaction:\n")
+  print(summary(m2)$coefficients)
+  cat(sprintf("  R² = %.3f, Adjusted R² = %.3f\n",
+              summary(m2)$r.squared, summary(m2)$adj.r.squared))
+
+  # Change in R² from adding interaction
+  
+  r2_change <- summary(m2)$r.squared - summary(m1)$r.squared
+  anova_comp <- anova(m1, m2)
+  f_change   <- anova_comp$F[2]
+  p_change   <- anova_comp$`Pr(>F)`[2]
+
+  cat(sprintf("\n  ΔR² = %.3f, F-change = %.3f, p = %.4f%s\n",
+              r2_change, f_change, p_change,
+              ifelse(p_change < .05, " *  <-- Significant moderation", "")))
+  ss_m1    <- anova(m1)
+  eta_sr   <- ss_m1[sr_c,    "Sum Sq"] / (ss_m1[sr_c,    "Sum Sq"] + ss_m1["Residuals", "Sum Sq"])
+  eta_ses  <- ss_m1["SES_c", "Sum Sq"] / (ss_m1["SES_c", "Sum Sq"] + ss_m1["Residuals", "Sum Sq"])
+  
+  ss_m2    <- anova(m2)
+  int_term <- paste0(sr_c, ":SES_c")
+  eta_int  <- ss_m2[int_term, "Sum Sq"] / (ss_m2[int_term, "Sum Sq"] + ss_m2["Residuals", "Sum Sq"])
+  
+  cat(sprintf("  η²p (SR main effect)       = %.3f\n", eta_sr))
+  cat(sprintf("  η²p (SES main effect)      = %.3f\n", eta_ses))
+  cat(sprintf("  η²p (SR × SES interaction) = %.3f\n", eta_int))
+}
+
+# Close the sink opened earlier
+
+sink()
+cat("\nResults saved to: analysis_results.txt\n")

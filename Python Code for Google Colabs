@@ -1,0 +1,66 @@
+# Python code for using minej/bert-base-personality on Google Colabs
+
+
+# 1. Install necessary AI libraries
+# !pip install transformers pandas torch
+
+from typing import Dict, List
+import pandas as pd
+from transformers import pipeline
+from google.colab import drive
+
+# 2. Connect to your Google Drive
+drive.mount('/content/drive')
+
+# 3. Load the Model (multi-label setup)
+
+pipe = pipeline(
+    "text-classification",
+    model="Minej/bert-base-personality",
+    top_k=None  # return all labels instead of just top one
+)
+
+# 4. Load data
+
+path: str = "/content/drive/MyDrive/datacleaned.csv"
+df: pd.DataFrame = pd.read_csv(path, encoding='latin-1')
+
+# 5. Map model labels to Big Five traits
+
+trait_map: Dict[str, str] = {
+    "LABEL_0": "Extroversion",
+    "LABEL_1": "Neuroticism",
+    "LABEL_2": "Agreeableness",
+    "LABEL_3": "Conscientiousness",
+    "LABEL_4": "Openness"
+}
+
+def format_result(result: List[Dict[str, float]]) -> Dict[str, float]:
+    return {
+        trait_map[item["label"]]: round(item["score"], 3)
+        for item in result
+    }
+
+# 6. Run scoring (batched + truncated)
+
+print("Scoring participants... this may take a minute.")
+
+responses: List[str] = df['Response'].astype(str).tolist()
+
+raw_results: List[List[Dict[str, float]]] = pipe(
+    responses,
+    batch_size=16,
+    truncation=True,
+    max_length=512
+)
+
+df['personality_results'] = [
+    format_result(res) for res in raw_results
+]
+
+# 7. Save results
+
+output_path: str = "/content/drive/MyDrive/Scored_Participants_1.csv"
+df.to_csv(output_path, index=False)
+
+# When complete, check Google Drive for 'Scored_Participants.csv'
